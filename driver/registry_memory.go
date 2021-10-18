@@ -366,7 +366,7 @@ func (r *RegistryMemory) prepareAuthn() {
 		interim := []authn.Authenticator{
 			authn.NewAuthenticatorAnonymous(r.c),
 			authn.NewAuthenticatorCookieSession(r.c),
-			authn.NewAuthenticatorBearerToken(r.c),
+			authn.NewAuthenticatorBearerToken(r.c, r.Logger()),
 			authn.NewAuthenticatorJWT(r.c, r),
 			authn.NewAuthenticatorNoOp(r.c),
 			authn.NewAuthenticatorOAuth2ClientCredentials(r.c),

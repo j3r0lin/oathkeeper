@@ -3,7 +3,10 @@ package authn
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
+	"github.com/dgraph-io/ristretto"
+	"github.com/ory/x/logrusx"
 	"github.com/pkg/errors"
 	"github.com/tidwall/gjson"
 
@@ -34,12 +37,17 @@ type AuthenticatorBearerTokenConfiguration struct {
 }
 
 type AuthenticatorBearerToken struct {
-	c configuration.Provider
+	c        configuration.Provider
+	cache    *ristretto.Cache
+	logger   *logrusx.Logger
+	cacheTTL time.Duration
 }
 
-func NewAuthenticatorBearerToken(c configuration.Provider) *AuthenticatorBearerToken {
+func NewAuthenticatorBearerToken(c configuration.Provider, logger *logrusx.Logger) *AuthenticatorBearerToken {
 	return &AuthenticatorBearerToken{
-		c: c,
+		c:        c,
+		logger:   logger,
+		cacheTTL: time.Second * 10,
 	}
 }
 
@@ -70,6 +78,24 @@ func (a *AuthenticatorBearerToken) Config(config json.RawMessage) (*Authenticato
 		c.SubjectFrom = "sub"
 	}
 
+	if a.cache == nil {
+		cost := int64(100000000)
+		a.logger.Debugf("Creating bearer token cache with max cost: %d", cost)
+		cache, err := ristretto.NewCache(&ristretto.Config{
+			// This will hold about 1000 unique mutation responses.
+			NumCounters: 10000,
+			// Allocate a max
+			MaxCost: cost,
+			// This is a best-practice value.
+			BufferItems: 64,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		a.cache = cache
+	}
+
 	return &c, nil
 }
 
@@ -84,9 +110,14 @@ func (a *AuthenticatorBearerToken) Authenticate(r *http.Request, session *Authen
 		return errors.WithStack(ErrAuthenticatorNotResponsible)
 	}
 
-	body, err := forwardRequestToSessionStore(r, cf.CheckSessionURL, cf.PreservePath, cf.PreserveHost, cf.SetHeaders)
-	if err != nil {
-		return err
+	cached := true
+	body := a.tokenFromCache(token)
+	if body == nil {
+		body, err = forwardRequestToSessionStore(r, cf.CheckSessionURL, cf.PreservePath, cf.PreserveHost, cf.SetHeaders)
+		if err != nil {
+			return err
+		}
+		cached = true
 	}
 
 	var (
@@ -107,5 +138,17 @@ func (a *AuthenticatorBearerToken) Authenticate(r *http.Request, session *Authen
 
 	session.Subject = subject
 	session.Extra = extra
+
+	if !cached {
+		a.cache.SetWithTTL(token, body, 1, a.cacheTTL)
+	}
+	return nil
+}
+
+func (a *AuthenticatorBearerToken) tokenFromCache(token string) json.RawMessage {
+	if item, found := a.cache.Get(token); found {
+		return item.(json.RawMessage)
+	}
+
 	return nil
 }
